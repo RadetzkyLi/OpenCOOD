@@ -32,8 +32,11 @@ def pcd_to_np(pcd_file):
 
     xyz = np.asarray(pcd.points)
     # we save the intensity in the first channel
-    intensity = np.expand_dims(np.asarray(pcd.colors)[:, 0], -1)
-    pcd_np = np.hstack((xyz, intensity))
+    if len(np.asarray(pcd.colors)) > 0:
+        intensity = np.expand_dims(np.asarray(pcd.colors)[:, 0], -1)
+        pcd_np = np.hstack((xyz, intensity))
+    else:
+        pcd_np = xyz
 
     return np.asarray(pcd_np, dtype=np.float32)
 

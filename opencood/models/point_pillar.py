@@ -18,7 +18,7 @@ class PointPillar(nn.Module):
 
         # PIllar VFE
         self.pillar_vfe = PillarVFE(args['pillar_vfe'],
-                                    num_point_features=4,
+                                    num_point_features=args['num_point_features'],
                                     voxel_size=args['voxel_size'],
                                     point_cloud_range=args['lidar_range'])
         self.scatter = PointPillarScatter(args['point_pillar_scatter'])

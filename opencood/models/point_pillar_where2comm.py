@@ -14,7 +14,7 @@ class PointPillarWhere2comm(nn.Module):
         self.max_cav = args['max_cav']
         # Pillar VFE
         self.pillar_vfe = PillarVFE(args['pillar_vfe'],
-                                    num_point_features=4,
+                                    num_point_features=args['num_point_features'],
                                     voxel_size=args['voxel_size'],
                                     point_cloud_range=args['lidar_range'])
         self.scatter = PointPillarScatter(args['point_pillar_scatter'])

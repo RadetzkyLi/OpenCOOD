@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
-# Author: Runsheng Xu <rxx3386@ucla.edu>
+# Author: 
+#   Runsheng Xu <rxx3386@ucla.edu>
+#   Rongsong Li <rongsong.li@qq.com>
 # License: TDG-Attribution-NonCommercial-NoDistrib
 
 
 import argparse
 import os
 import statistics
+import time
 
 import torch
 import tqdm
@@ -15,8 +18,10 @@ from torch.utils.data import DataLoader, DistributedSampler
 import opencood.hypes_yaml.yaml_utils as yaml_utils
 from opencood.tools import train_utils
 from opencood.tools import multi_gpu_utils
-from opencood.data_utils.datasets import build_dataset
+# from opencood.data_utils.datasets import build_dataset
+from opencood.data_utils.datasets_v2 import build_dataset
 from opencood.tools import train_utils
+from opencood.utils import logging_utils
 
 
 def train_parser():
@@ -37,11 +42,20 @@ def main():
     opt = train_parser()
     hypes = yaml_utils.load_yaml(opt.hypes_yaml, opt)
 
+    
+    saved_path = opt.model_dir if opt.model_dir else train_utils.setup_train(hypes)
+    # get logger
+    logger = logging_utils.init_logging(saved_path, debug=False)
+
     multi_gpu_utils.init_distributed_mode(opt)
 
-    print('-----------------Dataset Building------------------')
-    opencood_train_dataset = build_dataset(hypes, visualize=False, train=True)
-    opencood_validate_dataset = build_dataset(hypes, visualize=False, train=False)
+    logger.info('-----------------Dataset Building------------------')
+    opencood_train_dataset = build_dataset(hypes, visualize=False, partname="train")
+    opencood_validate_dataset = build_dataset(hypes, visualize=False, partname="val")
+    logger.info("%d samples for training, %d samples for validation"%(
+        opencood_train_dataset.__len__(),
+        opencood_validate_dataset.__len__()
+    ))
 
     if opt.distributed:
         sampler_train = DistributedSampler(opencood_train_dataset)
@@ -76,7 +90,7 @@ def main():
                                 pin_memory=False,
                                 drop_last=True)
 
-    print('---------------Creating Model------------------')
+    logger.info('---------------Creating Model------------------')
     model = train_utils.create_model(hypes)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -85,12 +99,15 @@ def main():
         saved_path = opt.model_dir
         init_epoch, model = train_utils.load_saved_model(saved_path,
                                                          model)
+        logger.info('{0}Continue Training from Epoch {1}{0}'.format(
+            '-'*15, init_epoch
+        ))
 
     else:
         init_epoch = 0
         # if we train the model from scratch, we need to create a folder
         # to save the model,
-        saved_path = train_utils.setup_train(hypes)
+        # saved_path = train_utils.setup_train(hypes)
 
     # we assume gpu is necessary
     if torch.cuda.is_available():
@@ -115,27 +132,32 @@ def main():
 
     # record training
     writer = SummaryWriter(saved_path)
+    train_loss_list,valid_loss_list = [],[]
 
     # half precision training
     if opt.half:
         scaler = torch.cuda.amp.GradScaler()
 
-    print('Training start')
+    start_time = time.time()
+    logger.info("Training Start")
     epoches = hypes['train_params']['epoches']
     # used to help schedule learning rate
 
     for epoch in range(init_epoch, max(epoches, init_epoch)):
-        if hypes['lr_scheduler']['core_method'] != 'cosineannealwarm':
-            scheduler.step(epoch)
-        if hypes['lr_scheduler']['core_method'] == 'cosineannealwarm':
-            scheduler.step_update(epoch * num_steps + 0)
-        for param_group in optimizer.param_groups:
-            print('learning rate %.7f' % param_group["lr"])
+        # if hypes['lr_scheduler']['core_method'] != 'cosineannealwarm':
+        #     scheduler.step(epoch)
+        # if hypes['lr_scheduler']['core_method'] == 'cosineannealwarm':
+        #     scheduler.step_update(epoch * num_steps + 0)
+        # for param_group in optimizer.param_groups:
+        #     logger.info("Epoch %d, learning rate: %.7f"%(epoch, param_group["lr"]))
 
         if opt.distributed:
             sampler_train.set_epoch(epoch)
 
         pbar2 = tqdm.tqdm(total=len(train_loader), leave=True)
+
+        train_ave_loss = []
+        start_time2 = time.time()
 
         for i, batch_data in enumerate(train_loader):
             # the model will be evaluation mode during validation
@@ -166,6 +188,7 @@ def main():
 
             criterion.logging(epoch, i, len(train_loader), writer, pbar=pbar2)
             pbar2.update(1)
+            train_ave_loss.append(final_loss.item())
 
             if not opt.half:
                 final_loss.backward()
@@ -177,6 +200,9 @@ def main():
 
             if hypes['lr_scheduler']['core_method'] == 'cosineannealwarm':
                 scheduler.step_update(epoch * num_steps + i)
+
+        # reocrd loss
+        train_loss_list.append(statistics.mean(train_ave_loss))
 
         if epoch % hypes['train_params']['save_freq'] == 0:
             torch.save(model_without_ddp.state_dict(),
@@ -196,11 +222,28 @@ def main():
                                            batch_data['ego']['label_dict'])
                     valid_ave_loss.append(final_loss.item())
             valid_ave_loss = statistics.mean(valid_ave_loss)
-            print('At epoch %d, the validation loss is %f' % (epoch,
-                                                              valid_ave_loss))
+            # record training detail
             writer.add_scalar('Validate_Loss', valid_ave_loss, epoch)
+            valid_loss_list.append(valid_ave_loss)
+            logger.info("Epoch %d, train loss: %.3f, val loss: %.3f, elapsed time: %.1fs"%(
+                epoch, train_loss_list[-1], valid_loss_list[-1], time.time()-start_time2
+            ))
+            logging_utils.draw_loss_figure(train_loss_list, 
+                                            valid_loss_list, 
+                                            save_dir=saved_path,
+                                            init_epoch=init_epoch)
 
-    print('Training Finished, checkpoints saved to %s' % saved_path)
+        # adjust learning rate
+        if hypes['lr_scheduler']['core_method'] != 'cosineannealwarm':
+            scheduler.step(epoch)
+        if hypes['lr_scheduler']['core_method'] == 'cosineannealwarm':
+            scheduler.step_update(epoch * num_steps + 0)
+        for param_group in optimizer.param_groups:
+            logger.info("Epoch %d, learning rate: %.7f"%(epoch, param_group["lr"]))
+
+    logger.info("Training Finished, checkpoints saved to %s, elapsed time %.1fs"%(
+        saved_path, time.time()-start_time
+    ))
 
 
 if __name__ == '__main__':

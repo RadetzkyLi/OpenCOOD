@@ -1,7 +1,5 @@
 name: point_pillar_early_fusion
-#root_dir: "opv2v_data_dumping/train"
 root_dir: "/media/amdin/Seagate Backup Plus Drive2/lrs/Multi-V2X"
-validate_dir: "opv2v_data_dumping/validate"
 
 yaml_parser: "load_point_pillar_params"
 train_params:
@@ -12,7 +10,7 @@ train_params:
   max_cav: 11
 
 pr_setting:
-  value: 0.1
+  value: 0.1  # target penetration rate
   path: "/home/lrs/scripts/V2X-TSG/data_stats/dataset_meta/pr_config.json"
 
 fusion:
@@ -28,7 +26,7 @@ preprocess:
     max_points_per_voxel: 32
     max_voxel_train: 32000
     max_voxel_test: 70000
-    num_point_features: &num_point_feats 3
+    num_point_features: &num_point_feats 3  # 4 if intensity is included
   # lidar range for each individual cav.
   cav_lidar_range: &cav_lidar [-140.8, -40, -3, 140.8, 40, 1]
 
@@ -67,7 +65,7 @@ model:
     voxel_size: *voxel_size
     lidar_range: *cav_lidar
     anchor_number: *achor_num
-    num_point_features: *num_point_feats
+    num_point_features: *num_point_feats  # must specified
     pillar_vfe:
       use_norm: true
       with_distance: false
