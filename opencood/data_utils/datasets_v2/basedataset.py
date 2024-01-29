@@ -34,6 +34,33 @@ def _get_agents_in_scenario(scenario_root):
                 x in os.listdir(scenario_root) if x.startswith("rsu")]
     return cav_list,rsu_list
 
+def _get_agent_config_for_pr(path, pr):
+    """Get the agent config for specific penetration rate.
+    
+    Parameters
+    ----------
+    path : str
+        Path of the penetration rate config file.
+
+    pr : float
+        The target penetration rate
+
+    Returns
+    -------
+    agent_config : list
+        Each element in the list is a dict, e.g.: {
+            "scenario_name": 'xxx',
+            "agent_config": [{
+                "seed": 43, 
+                "cav_list": [248, 269, 325], 
+                "ego_list": [269],
+                }, 
+            ...],
+        },
+
+    """
+    return load_yaml(path)[str(pr)]
+
 def _get_cav_extent_in_scenario(scenario_root):
     """Get extent of cav in given scenario.
 
@@ -96,9 +123,11 @@ def _get_timestamps_in_agent(agent_dir, partname="train"):
     n_test = N-n_train-n_val
 
     # set the following for debug
-    n_train = 1
-    n_val = 1
-    n_test = 1
+    # n_train = 1
+    # n_val = 1
+    # n_test = 1
+
+    return timestamps
 
     if partname == 'train':
         timestamps = timestamps[0:n_train]
@@ -142,7 +171,7 @@ def _load_camera_files(agent_dir, timestamp, agent_type="cav"):
     return file_list
 
 
-def _get_scenario_database(root_dir, agent_config, partname='train'):
+def _get_scenario_database(root_dir, all_agent_config, partname='train'):
     """Get scenario database based on given config.
     
     Parameters
@@ -157,10 +186,11 @@ def _get_scenario_database(root_dir, agent_config, partname='train'):
                     "seed": 43, 
                     "cav_list": [248, 269, 325], 
                     "rsu_list": [889], # added after this function
-                    "ego": [269],
-                    "len_list": [300], # added after this function }, 
+                    "ego_list": [269],
+                    "len_list": [300], # frames of each ego, added after this function 
+                }, 
                 ...],
-                "length": 3000 # added after this function
+                "length": 3000 # total frames of the scenario, added after this function
             },
             ...
         ]
@@ -170,7 +200,7 @@ def _get_scenario_database(root_dir, agent_config, partname='train'):
     Returns
     -------
     scenario_database: dict
-        Database similar as that of OpenCOOD, e.g.: {
+        Database similar to that of OpenCOOD, e.g.: {
             "Town01__2023": {
                 269: {
                     "000068": {
@@ -189,7 +219,7 @@ def _get_scenario_database(root_dir, agent_config, partname='train'):
     """
     scenario_database = OrderedDict()
     total_length = 0
-    for config in agent_config:
+    for config in all_agent_config:
         scenario_folder = os.path.join(root_dir, config["scenario_name"])
         cav_list = set([])
 
@@ -333,19 +363,32 @@ class BaseDataset(Dataset):
         else:
             self.max_cav = params['train_params']['max_cav']
 
-        root_dir = params['root_dir']
+        # simulate lidar intensity
+        if 'simulate_pcd_intensity' not in params['preprocess']:
+            params['preprocess']['simulate_pcd_intensity'] = None
+        
+
+        # CAV penetration rate
         self.penetration_rate = params['pr_setting']['value']
-        self.agent_config = load_yaml(params['pr_setting']['path'])[
-            str(self.penetration_rate)
-        ]
+        self.agent_config = _get_agent_config_for_pr(
+            params['pr_setting']['path'],
+            self.penetration_rate
+        )
+        # self.agent_config = load_yaml(params['pr_setting']['path'])[
+        #     str(self.penetration_rate)
+        # ]
 
         # Structure: {scenario_name : {cav_1 : {timestamp1 : {yaml: path,
         # lidar: path, cameras:list of path}}}}
+        root_dir = params['root_dir']
         self.scenario_database = _get_scenario_database(root_dir, self.agent_config, partname)
         
         # Structure: {scenario_name: {cav_1: [x, y, z]}}
         self.cav_extent = OrderedDict()
         for scenario_name in os.listdir(root_dir):
+            scenario_root = os.path.join(root_dir, scenario_name)
+            if not os.path.isdir(scenario_root):
+                continue
             self.cav_extent[scenario_name] = \
                 _get_cav_extent_in_scenario(os.path.join(root_dir, scenario_name))
 

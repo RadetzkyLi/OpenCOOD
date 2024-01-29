@@ -16,8 +16,8 @@ from torch.utils.data import DataLoader
 
 import opencood.hypes_yaml.yaml_utils as yaml_utils
 from opencood.tools import train_utils, inference_utils
-from opencood.data_utils.datasets import build_dataset
-# from opencood.data_utils.datasets_v2 import build_dataset
+# from opencood.data_utils.datasets import build_dataset
+from opencood.data_utils.datasets_v2 import build_dataset
 from opencood.utils import eval_utils
 from opencood.visualization import vis_utils
 import matplotlib.pyplot as plt
@@ -44,6 +44,10 @@ def test_parser():
                         help='whether to globally sort detections by confidence score.'
                              'If set to True, it is the mainstream AP computing method,'
                              'but would increase the tolerance for FP (False Positives).')
+    parser.add_argument('--dataset_root', type=str, default=None,
+                        help="root of testing data")
+    parser.add_argument('--pr_config', type=str, default=None,
+                        help='path of penetration rate setting')
     opt = parser.parse_args()
     return opt
 
@@ -56,13 +60,19 @@ def main():
                                                     'image mode or video mode'
 
     hypes = yaml_utils.load_yaml(None, opt)
+    # update some hype params
+    if opt.dataset_root:
+        hypes['root_dir'] = opt.dataset_root
+    if opt.pr_config:
+        hypes['pr_setting']['path'] = opt.pr_config
+        hypes['pr_setting']['value'] = 0.1  # assume the new pr_seeting are under pr of 0.1
 
     print('Dataset Building')
-    opencood_dataset = build_dataset(hypes, visualize=True, train=False)
+    opencood_dataset = build_dataset(hypes, visualize=True, partname="test")
     print(f"{len(opencood_dataset)} samples found.")
     data_loader = DataLoader(opencood_dataset,
                              batch_size=1,
-                             num_workers=16,
+                             num_workers=8,
                              collate_fn=opencood_dataset.collate_batch_test,
                              shuffle=False,
                              pin_memory=False,

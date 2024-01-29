@@ -260,6 +260,8 @@ class BaseDataset(Dataset):
                                                        cur_ego_pose_flag)
             data[cav_id]['lidar_np'] = \
                 pcd_utils.pcd_to_np(cav_content[timestamp_key_delay]['lidar'])
+            # to comply with actual num_features
+            # data[cav_id]['lidar_np'] = data[cav_id]['lidar_np'][:,:3]
         return data
 
     @staticmethod

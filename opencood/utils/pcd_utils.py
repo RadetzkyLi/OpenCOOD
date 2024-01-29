@@ -10,8 +10,10 @@ Utility functions related to point cloud
 import open3d as o3d
 import numpy as np
 
+from opencood.utils.pcd_intensity_utils import simulate_pcd_intensity
 
-def pcd_to_np(pcd_file):
+
+def pcd_to_np(pcd_file, intensity_simulation_method=None):
     """
     Read  pcd and return numpy array.
 
@@ -31,12 +33,14 @@ def pcd_to_np(pcd_file):
     pcd = o3d.io.read_point_cloud(pcd_file)
 
     xyz = np.asarray(pcd.points)
-    # we save the intensity in the first channel
+    
     if len(np.asarray(pcd.colors)) > 0:
+        # we save the intensity in the first channel
         intensity = np.expand_dims(np.asarray(pcd.colors)[:, 0], -1)
         pcd_np = np.hstack((xyz, intensity))
     else:
         pcd_np = xyz
+        pcd_np = simulate_pcd_intensity(xyz, intensity_simulation_method)
 
     return np.asarray(pcd_np, dtype=np.float32)
 

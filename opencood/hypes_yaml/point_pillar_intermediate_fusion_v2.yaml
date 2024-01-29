@@ -4,7 +4,7 @@ root_dir: "/media/amdin/Seagate Backup Plus Drive2/lrs/Multi-V2X"
 yaml_parser: "load_point_pillar_params"
 train_params:
   batch_size: &batch_size 2
-  epoches: 2
+  epoches: 15
   eval_freq: 1
   save_freq: 1
   max_cav: 11
