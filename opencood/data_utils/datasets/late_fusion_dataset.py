@@ -1,26 +1,28 @@
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-# Author: Runsheng Xu <rxx3386@ucla.edu>
-# License: TDG-Attribution-NonCommercial-NoDistrib
+'''
+@File    :   late_fusion_dataset.py
+@Date    :   2024-02-02
+@Author  :   Runsheng Xu <rxx3386@ucla.edu>
+@Modified:   Rongsong Li <rongsong.li@qq.com>
+@Version :   1.0
+@Desc    :   Late fusion
+'''
 
-"""
-Dataset class for late fusion
-"""
+
 import random
-import math
 from collections import OrderedDict
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
 
-import opencood.data_utils.datasets
 from opencood.data_utils.post_processor import build_postprocessor
 from opencood.data_utils.datasets import basedataset
 from opencood.data_utils.pre_processor import build_preprocessor
 from opencood.hypes_yaml.yaml_utils import load_yaml
 from opencood.utils import box_utils
 from opencood.utils.pcd_utils import \
-    mask_points_by_range, mask_ego_points, shuffle_points, \
+    mask_points_by_range, shuffle_points, \
     downsample_lidar_minimum
 from opencood.utils.transformation_utils import x1_to_x2
 
@@ -30,29 +32,59 @@ class LateFusionDataset(basedataset.BaseDataset):
     This class is for intermediate fusion where each vehicle transmit the
     detection outputs to ego.
     """
-    def __init__(self, params, visualize, train=True):
-        super(LateFusionDataset, self).__init__(params, visualize, train)
+    def __init__(self, params, visualize, partname='test'):
+        super(LateFusionDataset, self).__init__(params, visualize, partname)
+        
+        train_flag = True if partname == 'train' else False
         self.pre_processor = build_preprocessor(params['preprocess'],
-                                                train)
-        self.post_processor = build_postprocessor(params['postprocess'], train)
+                                                train_flag)
+        self.post_processor = build_postprocessor(params['postprocess'], 
+                                                  train_flag)
 
     def __getitem__(self, idx):
         base_data_dict = self.retrieve_base_data(idx)
-        if self.train:
+        if self.partname == 'train':
             reformat_data_dict = self.get_item_train(base_data_dict)
         else:
             reformat_data_dict = self.get_item_test(base_data_dict)
 
         return reformat_data_dict
+    
+    def process_ego_pose_for_generating_object_center(self, ego_pose):
+        """
+        For OPV2V, V2XSet and Multi-V2X, the `ego_pose` is a list of size 6 and nothing needs doing;
+        for V2V4Real, the `pose` is a matrix of shape (4,4), we need to convert it to identity matrix.
 
-    def get_item_single_car(self, selected_cav_base):
+        Parameters
+        ----------
+        ego_pose : list|ndarray
+            The ego's lidar pose.
+
+        Returns
+        -------
+        ego_pose : list|ndarray
+            The ego's lidar pose that needs to be used for generating object center.
+        """
+        if self.dataset_format == 'v2v4real':
+            ego_pose = np.identity(4)
+        else:
+            ego_pose = ego_pose
+        
+        return ego_pose
+
+
+    def get_item_single_car(self, cav_id:int, selected_cav_base, key_object_ids:list=[]):
         """
         Process a single CAV's information for the train/test pipeline.
 
         Parameters
         ----------
+        cav_id : int
+            The selected CAV's id.
         selected_cav_base : dict
             The dictionary contains a single CAV's raw information.
+        key_object_ids : list
+            The objects we focus on.
 
         Returns
         -------
@@ -68,14 +100,16 @@ class LateFusionDataset(basedataset.BaseDataset):
                                         self.params['preprocess'][
                                             'cav_lidar_range'])
         # remove points that hit ego vehicle
-        lidar_np = mask_ego_points(lidar_np)
-
+        lidar_np = self.mask_ego_points(lidar_np, selected_cav_base["scenario_id"], cav_id)
+        
         # generate the bounding box(n, 7) under the cav's space
-        object_bbx_center, object_bbx_mask, object_ids = \
+        object_bbx_center, object_bbx_mask, object_ids, object_categories = \
             self.post_processor.generate_object_center([selected_cav_base],
-                                                       selected_cav_base[
-                                                           'params'][
-                                                           'lidar_pose'])
+                                                       self.process_ego_pose_for_generating_object_center(
+                                                           selected_cav_base['params']['lidar_pose']),
+                                                       return_object_categories=True,
+                                                       key_object_ids=key_object_ids)
+        
         # data augmentation
         lidar_np, object_bbx_center, object_bbx_mask = \
             self.augment(lidar_np, object_bbx_center, object_bbx_mask)
@@ -93,7 +127,8 @@ class LateFusionDataset(basedataset.BaseDataset):
 
         selected_cav_processed.update({'object_bbx_center': object_bbx_center,
                                        'object_bbx_mask': object_bbx_mask,
-                                       'object_ids': object_ids})
+                                       'object_ids': object_ids,
+                                       'object_categories': object_categories})
 
         # generate targets label
         label_dict = \
@@ -116,7 +151,7 @@ class LateFusionDataset(basedataset.BaseDataset):
             selected_cav_id, selected_cav_base = \
                 list(base_data_dict.items())[0]
 
-        selected_cav_processed = self.get_item_single_car(selected_cav_base)
+        selected_cav_processed = self.get_item_single_car(selected_cav_id, selected_cav_base)
         processed_data_dict.update({'ego': selected_cav_processed})
 
         return processed_data_dict
@@ -131,32 +166,39 @@ class LateFusionDataset(basedataset.BaseDataset):
             if cav_content['ego']:
                 ego_id = cav_id
                 ego_lidar_pose = cav_content['params']['lidar_pose']
+                scenario_id = cav_content['scenario_id']
                 break
 
         assert ego_id != -1
         assert len(ego_lidar_pose) > 0
 
+        # key objects
+        key_object_ids = self.get_key_object_ids_in_scenario(scenario_id)
+
         # loop over all CAVs to process information
         for cav_id, selected_cav_base in base_data_dict.items():
-            distance = \
-                math.sqrt((selected_cav_base['params']['lidar_pose'][0] -
-                           ego_lidar_pose[0])**2 + (
-                                      selected_cav_base['params'][
-                                          'lidar_pose'][1] - ego_lidar_pose[
-                                          1])**2)
-            if distance > opencood.data_utils.datasets.COM_RANGE:
-                continue
-
             # find the transformation matrix from current cav to ego.
             cav_lidar_pose = selected_cav_base['params']['lidar_pose']
             transformation_matrix = x1_to_x2(cav_lidar_pose, ego_lidar_pose)
 
             selected_cav_processed = \
-                self.get_item_single_car(selected_cav_base)
+                self.get_item_single_car(cav_id, 
+                                         selected_cav_base, 
+                                         key_object_ids=key_object_ids)
             selected_cav_processed.update({'transformation_matrix':
                                                transformation_matrix})
+            if cav_id == ego_id:
+                selected_cav_processed["key_object_ids"] = key_object_ids
+
             update_cav = "ego" if cav_id == ego_id else cav_id
             processed_data_dict.update({update_cav: selected_cav_processed})
+
+        # test metric dict, in which communication volume is computed 
+        # after calling postprocess when validation/testing
+        test_metric_dict = self.get_test_metric_dict_instance(
+            len(base_data_dict)
+        )
+        processed_data_dict['ego'].update({'test_metric_dict': test_metric_dict})
 
         return processed_data_dict
 
@@ -194,6 +236,7 @@ class LateFusionDataset(basedataset.BaseDataset):
             object_bbx_mask = \
                 torch.from_numpy(np.array([cav_content['object_bbx_mask']]))
             object_ids = cav_content['object_ids']
+            object_categories = cav_content['object_categories']
 
             # the anchor box is the same for all bounding boxes usually, thus
             # we don't need the batch dimension.
@@ -231,6 +274,7 @@ class LateFusionDataset(basedataset.BaseDataset):
                                         'processed_lidar': processed_lidar_torch_dict,
                                         'label_dict': label_torch_dict,
                                         'object_ids': object_ids,
+                                        'object_categories': object_categories,
                                         'transformation_matrix': transformation_matrix_torch})
 
             if self.visualize:
@@ -245,6 +289,15 @@ class LateFusionDataset(basedataset.BaseDataset):
                 np.vstack(projected_lidar_list))
             output_dict['ego'].update({'origin_lidar': projected_lidar_stack})
 
+        # get key object ids for ego
+        output_dict['ego'].update({
+            "key_object_ids": batch['ego']['key_object_ids']
+        })
+        # test metric
+        output_dict['ego'].update({
+            "test_metric_dict": batch['ego']['test_metric_dict']
+        })
+       
         return output_dict
 
     def post_process(self, data_dict, output_dict):
@@ -270,4 +323,42 @@ class LateFusionDataset(basedataset.BaseDataset):
             self.post_processor.post_process(data_dict, output_dict)
         gt_box_tensor = self.post_processor.generate_gt_bbx(data_dict)
 
+        # compute communication volume in bytes
+        comm_vol = self.compute_communication_volume_for_late_fusion(output_dict)
+        # update test_metric_dict
+        data_dict['ego']['test_metric_dict'].update({
+            'comm_vol_list': [comm_vol]
+        })
+
         return pred_box_tensor, pred_score, gt_box_tensor
+    
+    @staticmethod
+    def compute_communication_volume_for_late_fusion(output_dict):
+        """
+        Compute the total communication volume in bytes for late fusion.
+        We assume all agents share predicted bbx with each other.
+
+        Parameters
+        ----------
+        output_dict : dict
+            The `output_dict` after calling dataset.postprocess in which
+            the number of prediction for each agent is counted.
+
+        Returns
+        -------
+        comm_vol : float
+            The total communication volume in bytes, i.e., receive + send.
+        """
+        ego_num_of_pred = output_dict['ego']['num_of_pred']
+        others_num_of_pred = \
+            np.sum([item['num_of_pred'] for item in output_dict.values()]) \
+            - ego_num_of_pred
+        
+        receive_num = others_num_of_pred
+        send_num = (len(output_dict)-1) * ego_num_of_pred
+        
+        # each bbx denoted by xyzlwhr
+        # the value is of float32
+        comm_vol = (receive_num + send_num) * 7 * 32/8
+
+        return comm_vol

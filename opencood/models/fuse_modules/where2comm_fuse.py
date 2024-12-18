@@ -36,10 +36,42 @@ class Communication(nn.Module):
             self.gaussian_filter.weight.device).unsqueeze(0).unsqueeze(0)
         self.gaussian_filter.bias.data.zero_()
 
+    def compute_communication_rete_new(self, communication_mask):
+        """
+        Customized calculation by Rongsong Li <rongsong.li@qq.com>.
+        It's assumed that all agents share info with each other.
+
+        Parameters
+        ----------
+        communication_mask : tensor
+            (L, H, W).
+
+        Returns
+        -------
+        communication_rate : float
+            The total communicatin rates, i.e., receive + send.
+        """
+        # print('shape:', communication_mask.shape)
+        L,C,H,W = communication_mask.shape
+        ego_num = communication_mask[0].sum()
+        others_num = communication_mask.sum() - ego_num
+
+        receive_num = others_num
+        send_num = (L-1)*ego_num
+
+        communication_rate = (receive_num+send_num) / (H*W)
+
+        return communication_rate
+
     def forward(self, batch_confidence_maps, B):
         """
+
+        New added features by Rongsong Li <rongsong.li@qq.com>:
+        1: when batch size = 1, it's regarded as validation/testing
+        and the new communication_rates is returned.
+
         Args:
-            batch_confidence_maps: [(L1, H, W), (L2, H, W), ...]
+            batch_confidence_maps: [(L1, C, H, W), (L2, C, H, W), ...]
         """
 
         _, _, H, W = batch_confidence_maps[0].shape
@@ -70,6 +102,8 @@ class Communication(nn.Module):
                 communication_mask = torch.ones_like(communication_maps).to(communication_maps.device)
 
             communication_rate = communication_mask.sum() / (L * H * W)
+            # new computed communication rate
+            communication_rate_new = self.compute_communication_rete_new(communication_mask)
             # Ego
             communication_mask[0] = 1
 
@@ -77,6 +111,10 @@ class Communication(nn.Module):
             communication_rates.append(communication_rate)
         communication_rates = sum(communication_rates) / B
         communication_masks = torch.cat(communication_masks, dim=0)
+
+        # regard as testing
+        if B == 1:
+            return communication_masks, communication_rate_new
         return communication_masks, communication_rates
 
 
@@ -119,6 +157,20 @@ class Where2comm(nn.Module):
 
         self.naive_communication = Communication(args['communication'])
 
+    def compute_communication_rates_for_fully(self, B, N):
+        """
+        Compute communication rates for fully connected case.
+
+        Returns
+        -------
+        communication_rates : float
+            Equivalent number of full feature maps transmitted. 
+            Non-negative; may greater than 1.
+        """
+        send_comm_rates = N - B
+        receive_comm_rates = N - B
+        return send_comm_rates + receive_comm_rates
+
     def regroup(self, x, record_len):
         cum_sum_len = torch.cumsum(record_len, dim=0)
         split_x = torch.tensor_split(x, cum_sum_len[:-1].cpu())
@@ -149,7 +201,9 @@ class Where2comm(nn.Module):
                 # 1. Communication (mask the features)
                 if i == 0:
                     if self.fully:
-                        communication_rates = torch.tensor(1).to(x.device)
+                        # communication_rates = torch.tensor(1).to(x.device)
+                        communication_rates = self.compute_communication_rates_for_fully(B, len(x))
+                        communication_rates = torch.tensor(communication_rates).to(x.device)
                     else:
                         # Prune
                         batch_confidence_maps = self.regroup(psm_single, record_len)
@@ -158,7 +212,7 @@ class Where2comm(nn.Module):
                             communication_masks = F.interpolate(communication_masks, size=(x.shape[-2], x.shape[-1]),
                                                                 mode='bilinear', align_corners=False)
                         x = x * communication_masks
-
+                    
                 # 2. Split the features
                 # split_x: [(L1, C, H, W), (L2, C, H, W), ...]
                 # For example [[2, 256, 48, 176], [1, 256, 48, 176], ...]
@@ -187,7 +241,9 @@ class Where2comm(nn.Module):
         else:
             # 1. Communication (mask the features)
             if self.fully:
-                communication_rates = torch.tensor(1).to(x.device)
+                # communication_rates = torch.tensor(1).to(x.device)
+                communication_rates = self.compute_communication_rates_for_fully(B, len(x))
+                communication_rates = torch.tensor(communication_rates).to(x.device)
             else:
                 # Prune
                 batch_confidence_maps = self.regroup(psm_single, record_len)

@@ -54,7 +54,7 @@ def x_to_world(pose):
     return matrix
 
 
-def x1_to_x2(x1, x2):
+def x1_to_x2_old(x1, x2):
     """
     Transformation matrix from x1 to x2.
 
@@ -76,6 +76,43 @@ def x1_to_x2(x1, x2):
     world_to_x2 = np.linalg.inv(x2_to_world)
 
     transformation_matrix = np.dot(world_to_x2, x1_to_world)
+    return transformation_matrix
+
+def x1_to_x2(x1, x2):
+    """
+    Transformation matrix from x1 to x2.
+
+    Parameters
+    ----------
+    x1 : list or np.ndarray
+        The pose of x1 under world coordinates or
+        transformation matrix x1->world
+    x2 : list or np.ndarray
+        The pose of x2 under world coordinates or
+         transformation matrix x2->world
+
+    Returns
+    -------
+    transformation_matrix : np.ndarray
+        The transformation matrix.
+
+    """
+    if isinstance(x1, list) and isinstance(x2, list):
+        x1_to_world = x_to_world(x1)
+        x2_to_world = x_to_world(x2)
+        world_to_x2 = np.linalg.inv(x2_to_world)
+        transformation_matrix = np.dot(world_to_x2, x1_to_world)
+
+    # object pose is list while lidar pose is transformation matrix
+    elif isinstance(x1, list) and not isinstance(x2, list):
+        x1_to_world = x_to_world(x1)
+        world_to_x2 = x2
+        transformation_matrix = np.dot(world_to_x2, x1_to_world)
+    # both are numpy matrix
+    else:
+        world_to_x2 = np.linalg.inv(x2)
+        transformation_matrix = np.dot(world_to_x2, x1)
+
     return transformation_matrix
 
 

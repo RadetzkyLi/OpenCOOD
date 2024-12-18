@@ -13,7 +13,7 @@ import numpy as np
 from opencood.utils.pcd_intensity_utils import simulate_pcd_intensity
 
 
-def pcd_to_np(pcd_file, intensity_simulation_method=None):
+def pcd_to_np(pcd_file, intensity_simulation_method=None, num_point_features:int=4):
     """
     Read  pcd and return numpy array.
 
@@ -21,6 +21,13 @@ def pcd_to_np(pcd_file, intensity_simulation_method=None):
     ----------
     pcd_file : str
         The pcd file that contains the point cloud.
+
+    intensity_simulation_method : str|None
+        Curently, {"carla", None} are supported. If the data
+        contains intensity already, the param is ignored.
+
+    num_point_features : int    
+        3: xyz; 4: xyzi.
 
     Returns
     -------
@@ -34,7 +41,7 @@ def pcd_to_np(pcd_file, intensity_simulation_method=None):
 
     xyz = np.asarray(pcd.points)
     
-    if len(np.asarray(pcd.colors)) > 0:
+    if len(np.asarray(pcd.colors)) > 0 and num_point_features>3:
         # we save the intensity in the first channel
         intensity = np.expand_dims(np.asarray(pcd.colors)[:, 0], -1)
         pcd_np = np.hstack((xyz, intensity))

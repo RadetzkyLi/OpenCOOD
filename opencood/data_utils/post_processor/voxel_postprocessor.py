@@ -25,7 +25,7 @@ class VoxelPostprocessor(BasePostprocessor):
         super(VoxelPostprocessor, self).__init__(anchor_params, train)
         self.anchor_num = self.params['anchor_args']['num']
 
-    def generate_anchor_box(self):
+    def generate_anchor_box_v1(self):
         W = self.params['anchor_args']['W']
         H = self.params['anchor_args']['H']
 
@@ -74,6 +74,78 @@ class VoxelPostprocessor(BasePostprocessor):
             sys.exit('Unknown bbx order.')
 
         return anchors
+    
+    def generate_anchor_box_v2(self):
+        """
+        Generate anchor boxes with multiple sizes and orientations.
+        """
+        W = self.params['anchor_args']['W']
+        H = self.params['anchor_args']['H']
+
+        l = self.params['anchor_args']['l']
+        w = self.params['anchor_args']['w']
+        h = self.params['anchor_args']['h']
+        r = self.params['anchor_args']['r']
+
+        assert self.anchor_num == len(r)
+        assert len(l) == len(r)
+        assert len(w) == len(r)
+        assert len(h) == len(r)
+        r = [math.radians(ele) for ele in r]
+
+        vh = self.params['anchor_args']['vh']
+        vw = self.params['anchor_args']['vw']
+
+        xrange = [self.params['anchor_args']['cav_lidar_range'][0],
+                  self.params['anchor_args']['cav_lidar_range'][3]]
+        yrange = [self.params['anchor_args']['cav_lidar_range'][1],
+                  self.params['anchor_args']['cav_lidar_range'][4]]
+
+        if 'feature_stride' in self.params['anchor_args']:
+            feature_stride = self.params['anchor_args']['feature_stride']
+        else:
+            feature_stride = 2
+
+        x = np.linspace(xrange[0] + vw, xrange[1] - vw, W // feature_stride)
+        y = np.linspace(yrange[0] + vh, yrange[1] - vh, H // feature_stride)
+
+        cx, cy = np.meshgrid(x, y)
+        cx = np.tile(cx[..., np.newaxis], self.anchor_num)
+        cy = np.tile(cy[..., np.newaxis], self.anchor_num)
+        cz = np.ones_like(cx) * -1.0
+
+        if self.params['order'] == 'hwl':
+            ori_size_list = [h, w, l, r] 
+        elif self.params['order'] == 'lhw':
+            ori_size_list = [l, h, w, r]
+        else:
+            sys.exit('Unknown bbx order.')
+
+        size_list = []
+        for ori_size in ori_size_list:
+            size = np.ones_like(cx)
+            for i in range(self.anchor_num):
+                size[..., i] = ori_size[i]
+            size_list.append(size)
+
+        if self.params['order'] == 'hwl':
+            anchors = np.stack([cx, cy, cz] + size_list, axis=-1)
+        elif self.params['order'] == 'lhw':
+            anchors = np.stack([cx, cy, cz] + size_list, axis=-1)
+        else:
+            sys.exit('Unknown bbx order.')
+
+        return anchors
+    
+    def generate_anchor_box(self):
+        l = self.params['anchor_args']['l']
+
+        if isinstance(l, list):
+            # the new one
+            return self.generate_anchor_box_v2()
+        else:
+            # the original one
+            return self.generate_anchor_box_v1()
 
     def generate_label(self, **kwargs):
         """
@@ -240,6 +312,11 @@ class VoxelPostprocessor(BasePostprocessor):
         Step2: project the bounding boxes to ego space.
         Step:3 NMS
 
+
+        New added features by Rongsong Li <rongsong.li@qq.com>:
+        1. add num of pred bbx for each cav in output_dict, e.g.,
+        output_dict['ego']['num_of_pred'] = 10.
+
         Parameters
         ----------
         data_dict : dict
@@ -289,6 +366,10 @@ class VoxelPostprocessor(BasePostprocessor):
                                           mask_reg[0]).view(-1, 7)
             scores = torch.masked_select(prob[0], mask[0])
 
+            # ========= new added: num of pred ==========
+            output_dict[cav_id].update({'num_of_pred': len(batch_box3d)})
+            # ========= end                    ==========
+
             # convert output to bounding box
             if len(boxes3d) != 0:
                 # (N, 8, 3)
@@ -311,6 +392,7 @@ class VoxelPostprocessor(BasePostprocessor):
 
         if len(pred_box2d_list) ==0 or len(pred_box3d_list) == 0:
             return None, None
+        
         # shape: (N, 5)
         pred_box2d_list = torch.vstack(pred_box2d_list)
         # scores

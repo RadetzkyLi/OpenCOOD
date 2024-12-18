@@ -1,31 +1,37 @@
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-# Author: Runsheng Xu <rxx3386@ucla.edu>
-# License: TDG-Attribution-NonCommercial-NoDistrib
-
-"""
-Basedataset class for all kinds of fusion.
-"""
+'''
+@File    :   basedataset.py
+@Date    :   2024-02-01
+@Author  :   Runsheng Xu <rxx3386@ucla.edu>
+@Modified:   Rongsong Li <rongsong.li@qq.com>
+@Version :   1.0
+@Desc    :   Base dataset for V2X perception
+'''
 
 import os
-import math
+import sys
+import logging
+import random
+import numpy as np
 from collections import OrderedDict
 
 import torch
-import numpy as np
 from torch.utils.data import Dataset
 
 import opencood.utils.pcd_utils as pcd_utils
 from opencood.data_utils.augmentor.data_augmentor import DataAugmentor
+from opencood.data_utils.scenario_database_manager import build_scenario_database_manager
 from opencood.hypes_yaml.yaml_utils import load_yaml
 from opencood.utils.pcd_utils import downsample_lidar_minimum
 from opencood.utils.transformation_utils import x1_to_x2
 
-
-class BaseDataset(Dataset):
+class BaseDataset:
     """
     Base dataset for all kinds of fusion. Mainly used to initialize the
     database and associate the __get_item__ index with the correct timestamp
     and scenario.
+    The dataset is designed for testing scenarios.
 
     Parameters
     __________
@@ -38,12 +44,8 @@ class BaseDataset(Dataset):
 
     Attributes
     ----------
-    scenario_database : OrderedDict
-        A structured dictionary contains all file information.
-
-    len_record : list
-        The list to record each scenario's data length. This is used to
-        retrieve the correct index during training.
+    database_manager : class
+        Used to manage scenario data, e.g., retriving samples.
 
     pre_processor : opencood.pre_processor
         Used to preprocess the raw data.
@@ -56,17 +58,42 @@ class BaseDataset(Dataset):
         Used to augment data.
 
     """
+    def __init__(self, params, visualize, partname='test') -> None:
+        assert partname in ['train', 'val', 'test'], "Unexpected `partname`!"
 
-    def __init__(self, params, visualize, train=True):
         self.params = params
         self.visualize = visualize
-        self.train = train
+        self.partname = partname
+        self.dataset_format = \
+            params.get("dataset_format", "opv2v")  # "opv2v", "v2v4real", "multi-v2x", "test" supported
 
         self.pre_processor = None
         self.post_processor = None
+        train_flag = True if partname == 'train' else False
         self.data_augmentor = DataAugmentor(params['data_augment'],
-                                            train)
+                                            train_flag)
+        
+        # simulate lidar intensity
+        if 'intensity_simulation_method' not in params['preprocess']:
+            params['preprocess']['intensity_simulation_method'] = 'carla'  # 'carla', None, 'none' supported
+        # featurs of point cloud
+        if 'num_point_features' not in params['preprocess']['args']:
+            params['preprocess']['args']['num_point_features'] = 4
 
+        # keep key objects anyway
+        if "keep_key_objects_anyway" not in params['preprocess']:
+            params['preprocess']['keep_key_objects_anyway'] = False
+
+        # wild settings
+        self.init_wild_settings(params)
+
+        # database manager
+        self.database_manager = build_scenario_database_manager(params, partname, self.dataset_format)
+
+
+    def init_wild_settings(self, params):
+        """
+        """
         # if the training/testing include noisy setting
         if 'wild_setting' in params:
             self.seed = params['wild_setting']['seed']
@@ -104,97 +131,66 @@ class BaseDataset(Dataset):
             self.transmission_speed = 27  # Mbps
             self.backbone_delay = 0  # ms
 
-        if self.train:
-            root_dir = params['root_dir']
-        else:
-            root_dir = params['validate_dir']
-
         if 'train_params' not in params or\
                 'max_cav' not in params['train_params']:
             self.max_cav = 7
         else:
             self.max_cav = params['train_params']['max_cav']
 
-        # first load all paths of different scenarios
-        scenario_folders = sorted([os.path.join(root_dir, x)
-                                   for x in os.listdir(root_dir) if
-                                   os.path.isdir(os.path.join(root_dir, x))])
-        # Structure: {scenario_id : {cav_1 : {timestamp1 : {yaml: path,
-        # lidar: path, cameras:list of path}}}}
-        self.scenario_database = OrderedDict()
-        self.len_record = []
-
-        # loop over all scenarios
-        for (i, scenario_folder) in enumerate(scenario_folders):
-            self.scenario_database.update({i: OrderedDict()})
-
-            # at least 1 cav should show up
-            cav_list = sorted([x for x in os.listdir(scenario_folder)
-                               if os.path.isdir(
-                    os.path.join(scenario_folder, x))])
-            assert len(cav_list) > 0
-
-            # roadside unit data's id is always negative, so here we want to
-            # make sure they will be in the end of the list as they shouldn't
-            # be ego vehicle.
-            if int(cav_list[0]) < 0:
-                cav_list = cav_list[1:] + [cav_list[0]]
-
-            # loop over all CAV data
-            for (j, cav_id) in enumerate(cav_list):
-                if j > self.max_cav - 1:
-                    print('too many cavs')
-                    break
-                self.scenario_database[i][cav_id] = OrderedDict()
-
-                # save all yaml files to the dictionary
-                cav_path = os.path.join(scenario_folder, cav_id)
-
-                # use the frame number as key, the full path as the values
-                yaml_files = \
-                    sorted([os.path.join(cav_path, x)
-                            for x in os.listdir(cav_path) if
-                            x.endswith('.yaml') and 'additional' not in x])
-                timestamps = self.extract_timestamps(yaml_files)
-
-                for timestamp in timestamps:
-                    self.scenario_database[i][cav_id][timestamp] = \
-                        OrderedDict()
-
-                    yaml_file = os.path.join(cav_path,
-                                             timestamp + '.yaml')
-                    lidar_file = os.path.join(cav_path,
-                                              timestamp + '.pcd')
-                    camera_files = self.load_camera_files(cav_path, timestamp)
-
-                    self.scenario_database[i][cav_id][timestamp]['yaml'] = \
-                        yaml_file
-                    self.scenario_database[i][cav_id][timestamp]['lidar'] = \
-                        lidar_file
-                    self.scenario_database[i][cav_id][timestamp]['camera0'] = \
-                        camera_files
-                # Assume all cavs will have the same timestamps length. Thus
-                # we only need to calculate for the first vehicle in the
-                # scene.
-                if j == 0:
-                    # we regard the agent with the minimum id as the ego
-                    self.scenario_database[i][cav_id]['ego'] = True
-                    if not self.len_record:
-                        self.len_record.append(len(timestamps))
-                    else:
-                        prev_last = self.len_record[-1]
-                        self.len_record.append(prev_last + len(timestamps))
-                else:
-                    self.scenario_database[i][cav_id]['ego'] = False
 
     def __len__(self):
-        return self.len_record[-1]
+        return self.database_manager.get_number_of_total_samples()
 
     def __getitem__(self, idx):
         """
         Abstract method, needs to be define by the children class.
         """
         pass
+
+    def is_rsu_agent(self, scenario_id:int, agent_id:int):
+        """
+        Judge whether the given agent is RSU.
+
+        Parameters
+        ----------
+        agent_id: int
+            The agent's id.
+
+        idx: int
+            The data index.
+
+        Returns
+        -------
+        flag: bool
+            If the agent is rsu, return True.
+        """
+        flag = self.database_manager.is_rsu_agent(scenario_id, agent_id)
+        return flag
+    
+    def get_connected_agents_for_timestamp(self, scenario_id, ego_id, timestamp):
+        """
+        Get connected agents for given agent at given timestamp.
+        If the number of total agents exceeds the `max_agent`, 
+        random select some of them to use.
+        TODO: adaptively select which connectable agents to connect.
+        """
+        # agents that ego can connect to
+        cav_id_list,rsu_id_list = self.database_manager.get_connected_agents_for_timestamp(
+            scenario_id, ego_id, timestamp
+        )
+
+        num_cav = len(cav_id_list)
+        num_rsu = len(rsu_id_list)
+        # If ego plus conn exceed max_cav, random select some conn.
+        if num_cav+num_rsu> self.max_cav - 1:
+            if self.partname == 'val' or self.partname == 'test':
+                seed = 55
+                random.seed(seed)
+            conn_list = random.sample(cav_id_list+rsu_id_list, self.max_cav-1)
+        else:
+            conn_list = cav_id_list + rsu_id_list
+
+        return conn_list
 
     def retrieve_base_data(self, idx, cur_ego_pose_flag=True):
         """
@@ -217,134 +213,59 @@ class BaseDataset(Dataset):
             The dictionary contains loaded yaml params and lidar data for
             each cav.
         """
-        # we loop the accumulated length list to see get the scenario index
-        scenario_index = 0
-        for i, ele in enumerate(self.len_record):
-            if idx < ele:
-                scenario_index = i
-                break
-        scenario_database = self.scenario_database[scenario_index]
+        scenario_id,ego_id,timestamp = self.database_manager.get_ids_from_sample_index(idx)
+        cur_scenario_database = self.database_manager.scenario_database[scenario_id]
 
-        # check the timestamp index
-        timestamp_index = idx if scenario_index == 0 else \
-            idx - self.len_record[scenario_index - 1]
-        # retrieve the corresponding timestamp key
-        timestamp_key = self.return_timestamp_key(scenario_database,
-                                                  timestamp_index)
-        # calculate distance to ego for each cav
-        ego_cav_content = \
-            self.calc_dist_to_ego(scenario_database, timestamp_key)
+        # get connected agents
+        conn_list = self.get_connected_agents_for_timestamp(
+            scenario_id, ego_id, timestamp
+        )
 
         data = OrderedDict()
-        # load files for all CAVs
-        for cav_id, cav_content in scenario_database.items():
-            data[cav_id] = OrderedDict()
-            data[cav_id]['ego'] = cav_content['ego']
+        # if the number of point hit on a object exceed or equal to thr_visibility,
+        # the object is regarded as visible
+        thr_visibility = 1 
 
-            # calculate delay for this vehicle
-            timestamp_delay = \
-                self.time_delay_calculation(cav_content['ego'])
+        # reorder so that ego be the first
+        for agent_id in [ego_id] + conn_list:
+            ego_flag = True if agent_id == ego_id else False
+            # calculate time delay
+            time_delay = self.time_delay_calculation(ego_flag=ego_flag)
+            timestamp_delay = self.database_manager.calc_timestamp_with_gap(timestamp, -time_delay)
+            # print(timestamp, time_delay, timestamp_delay)
 
-            if timestamp_index - timestamp_delay <= 0:
-                timestamp_delay = timestamp_index
-            timestamp_index_delay = max(0, timestamp_index - timestamp_delay)
-            timestamp_key_delay = self.return_timestamp_key(scenario_database,
-                                                            timestamp_index_delay)
-            # add time delay to vehicle parameters
-            data[cav_id]['time_delay'] = timestamp_delay
-            # load the corresponding data into the dictionary
-            data[cav_id]['params'] = self.reform_param(cav_content,
-                                                       ego_cav_content,
-                                                       timestamp_key,
-                                                       timestamp_key_delay,
-                                                       cur_ego_pose_flag)
-            data[cav_id]['lidar_np'] = \
-                pcd_utils.pcd_to_np(cav_content[timestamp_key_delay]['lidar'])
-            # to comply with actual num_features
-            # data[cav_id]['lidar_np'] = data[cav_id]['lidar_np'][:,:3]
+            # in case some agents have no delayed timestamp
+            if not ego_flag and \
+                not self.database_manager.is_agent_has_timestamp(scenario_id, agent_id, timestamp_delay):
+                continue
+
+            data[agent_id] = OrderedDict()
+            data[agent_id]['ego'] = ego_flag
+            data[agent_id]['scenario_id'] = scenario_id
+
+            # add time delay vehicle parameters
+            data[agent_id]['time_delay'] = time_delay
+            # load corresponding data into the dictionary
+            data[agent_id]['params'] = self.reform_param(
+                cur_scenario_database[agent_id],
+                cur_scenario_database[ego_id],
+                timestamp,
+                timestamp_delay,
+                cur_ego_pose_flag,
+                data[agent_id]['ego'],
+                thr_visibility=thr_visibility,
+                scenario_id=scenario_id
+            )
+            data[agent_id]['lidar_np'] = \
+                pcd_utils.pcd_to_np(
+                    cur_scenario_database[agent_id][timestamp_delay]['lidar'],
+                    self.params['preprocess']['intensity_simulation_method'],
+                    self.params['preprocess']['args']['num_point_features']
+                )
+
         return data
-
-    @staticmethod
-    def extract_timestamps(yaml_files):
-        """
-        Given the list of the yaml files, extract the mocked timestamps.
-
-        Parameters
-        ----------
-        yaml_files : list
-            The full path of all yaml files of ego vehicle
-
-        Returns
-        -------
-        timestamps : list
-            The list containing timestamps only.
-        """
-        timestamps = []
-
-        for file in yaml_files:
-            res = file.split('/')[-1]
-
-            timestamp = res.replace('.yaml', '')
-            timestamps.append(timestamp)
-
-        return timestamps
-
-    @staticmethod
-    def return_timestamp_key(scenario_database, timestamp_index):
-        """
-        Given the timestamp index, return the correct timestamp key, e.g.
-        2 --> '000078'.
-
-        Parameters
-        ----------
-        scenario_database : OrderedDict
-            The dictionary contains all contents in the current scenario.
-
-        timestamp_index : int
-            The index for timestamp.
-
-        Returns
-        -------
-        timestamp_key : str
-            The timestamp key saved in the cav dictionary.
-        """
-        # get all timestamp keys
-        timestamp_keys = list(scenario_database.items())[0][1]
-        # retrieve the correct index
-        timestamp_key = list(timestamp_keys.items())[timestamp_index][0]
-
-        return timestamp_key
-
-    def calc_dist_to_ego(self, scenario_database, timestamp_key):
-        """
-        Calculate the distance to ego for each cav.
-        """
-        ego_lidar_pose = None
-        ego_cav_content = None
-        # Find ego pose first
-        for cav_id, cav_content in scenario_database.items():
-            if cav_content['ego']:
-                ego_cav_content = cav_content
-                ego_lidar_pose = \
-                    load_yaml(cav_content[timestamp_key]['yaml'])['lidar_pose']
-                break
-
-        assert ego_lidar_pose is not None
-
-        # calculate the distance
-        for cav_id, cav_content in scenario_database.items():
-            cur_lidar_pose = \
-                load_yaml(cav_content[timestamp_key]['yaml'])['lidar_pose']
-            distance = \
-                math.sqrt((cur_lidar_pose[0] -
-                           ego_lidar_pose[0]) ** 2 +
-                          (cur_lidar_pose[1] - ego_lidar_pose[1]) ** 2)
-            cav_content['distance_to_ego'] = distance
-            scenario_database.update({cav_id: cav_content})
-
-        return ego_cav_content
-
-    def time_delay_calculation(self, ego_flag):
+    
+    def time_delay_calculation(self, ego_flag:bool):
         """
         Calculate the time delay for a certain vehicle.
 
@@ -355,12 +276,13 @@ class BaseDataset(Dataset):
 
         Return
         ------
-        time_delay : int
-            The time delay quantization.
+        time_delay : float
+            The time delay in seconds.
         """
         # there is not time delay for ego vehicle
         if ego_flag:
-            return 0
+            return 0.0
+        
         # time delay real mode
         if self.async_mode == 'real':
             # in the real mode, time delay = systematic async time + data
@@ -372,10 +294,8 @@ class BaseDataset(Dataset):
             # in the simulation mode, the time delay is constant
             time_delay = np.abs(self.async_overhead)
 
-        # the data is 10 hz for both opv2v and v2x-set
-        # todo: it may not be true for other dataset like DAIR-V2X and V2X-Sim
-        time_delay = time_delay // 100
-        return time_delay if self.async_flag else 0
+        time_delay = time_delay / 1000.0
+        return time_delay if self.async_flag else 0.0
 
     def add_loc_noise(self, pose, xyz_std, ryp_std):
         """
@@ -392,6 +312,10 @@ class BaseDataset(Dataset):
         ryp_std : float
             std of the gaussian noise
         """
+        # there is no need to add noise for real world data
+        if self.dataset_format == 'v2v4real':
+            return pose
+        
         np.random.seed(self.seed)
         xyz_noise = np.random.normal(0, xyz_std, 3)
         ryp_std = np.random.normal(0, ryp_std, 3)
@@ -404,7 +328,9 @@ class BaseDataset(Dataset):
         return noise_pose
 
     def reform_param(self, cav_content, ego_content, timestamp_cur,
-                     timestamp_delay, cur_ego_pose_flag):
+                     timestamp_delay, cur_ego_pose_flag, is_ego,
+                     thr_visibility:int=1, 
+                     scenario_id:int=None):
         """
         Reform the data params with current timestamp object groundtruth and
         delay timestamp LiDAR pose for other CAVs.
@@ -426,6 +352,16 @@ class BaseDataset(Dataset):
         cur_ego_pose_flag : bool
             Whether use current ego pose to calculate transformation matrix.
 
+        is_ego : bool
+            Whether the agent is the ego.
+
+        thr_visibility : int
+            If hit lidar points on an object reached `thr_visibility`, it
+            is regarded as visible.
+
+        scenario_id : int
+            It cannot be None when `keep_key_objects_anyway` is Ture.
+
         Return
         ------
         The merged parameters.
@@ -444,7 +380,7 @@ class BaseDataset(Dataset):
         cur_ego_lidar_pose = cur_ego_params['lidar_pose']
         cur_cav_lidar_pose = cur_params['lidar_pose']
 
-        if not cav_content['ego'] and self.loc_err_flag:
+        if not is_ego and self.loc_err_flag:
             delay_cav_lidar_pose = self.add_loc_noise(delay_cav_lidar_pose,
                                                       self.xyz_noise_std,
                                                       self.ryp_noise_std)
@@ -468,41 +404,140 @@ class BaseDataset(Dataset):
                                             cur_ego_lidar_pose)
 
         # we always use current timestamp's gt bbx to gain a fair evaluation
-        delay_params['vehicles'] = cur_params['vehicles']
+        delay_params['vehicles'] = \
+            self.get_visible_objects(cav_content, cur_params, timestamp_cur, 
+                                     thr_visibility, scenario_id)
         delay_params['transformation_matrix'] = transformation_matrix
         delay_params['gt_transformation_matrix'] = \
             gt_transformation_matrix
         delay_params['spatial_correction_matrix'] = spatial_correction_matrix
 
-        return delay_params
+        # get key objects
+        if is_ego:
+            self.get_key_objects_for_agent(delay_params['vehicles'], 
+                                           scenario_id, 
+                                           ego_content[timestamp_cur]['yaml'])
 
-    @staticmethod
-    def load_camera_files(cav_path, timestamp):
+        return delay_params
+    
+    def get_visible_objects(self, cav_content, cav_params, timestamp:str, thr:int=1, 
+                            scenario_id:int=None):
         """
-        Retrieve the paths to all camera files.
+        Obtain the visible objects of the agent at given timestamp.
 
         Parameters
         ----------
-        cav_path : str
-            The full file path of current cav.
+        cav_content : dict
+            Dictionary that contains all file paths in the current cav/rsu.
+        
+        cav_params: dict
+            The agent's annotations loaded from a yaml file.
 
-        timestamp : str
-            Current timestamp
+        timestamp: str
+            The specific timestamp, e.g., "000068".
+
+        thr: int
+            If an object is hit by at least `thr` laser beams, the object
+            is regarded as visible.
+
+        scenario_id : int
+            It cannot be None if `keep_key_objects_anyway` is True.
+
+        keep_key_objects_anyway : bool
+            If set, the key objects will be kept as gt even if they are not 
+            observed by any agents.
 
         Returns
         -------
-        camera_files : list
-            The list containing all camera png file paths.
+        visible_objects: dict
+            The agent's visible objects.
         """
-        camera0_file = os.path.join(cav_path,
-                                    timestamp + '_camera0.png')
-        camera1_file = os.path.join(cav_path,
-                                    timestamp + '_camera1.png')
-        camera2_file = os.path.join(cav_path,
-                                    timestamp + '_camera2.png')
-        camera3_file = os.path.join(cav_path,
-                                    timestamp + '_camera3.png')
-        return [camera0_file, camera1_file, camera2_file, camera3_file]
+        # the dataset is OPV2V or V2XSet or V2V4Real 
+        if cav_content[timestamp]["view"] is None:
+            visible_objects = cav_params["vehicles"]
+        # the dataset is Multi-V2X
+        else:
+            hit_objects = load_yaml(cav_content[timestamp]["view"])["visible_objects"]
+            visible_object_ids = [el['object_id'] for el in hit_objects 
+                                    if el["visible_points"] >= thr]
+            visible_objects = {obj_id:obj_info for obj_id,obj_info in cav_params["objects"].items()
+                               if obj_id in visible_object_ids}
+            self.correct_object_center(visible_objects)
+        return visible_objects
+    
+    @staticmethod
+    def correct_object_center(objects_info):
+        """To fix the CARLA bug: cycle and motor's bounding box's center's y value
+        exceed zero greatly, e.g., 125 meters, which is wrong!
+        To repair this, once bbox's center's y value exceed 0.5 meters, we reset 
+        it to zero.
+        """
+        thr = 0.5  # meters
+        for obj_id in objects_info.keys():
+            if objects_info[obj_id]['center'][1] > thr:
+                objects_info[obj_id]['center'][1] = 0.0
+    
+    def get_key_object_ids_in_scenario(self, scenario_id:int):
+        """Get key objects' ids for given scenario.
+        Now, occludees are taken as key objects.
+
+        Parameters
+        ----------
+        scenario_id : int
+
+        Returns
+        -------
+        key_object_ids : list[int]
+        """
+        key_object_ids = self.database_manager.get_key_object_ids_in_scenario(scenario_id)
+        return key_object_ids[:]
+    
+    def get_key_objects_for_agent(self, object_dict, scenario_id, cur_agent_yaml_path:str):
+        """
+        Get key objects' info for agent.
+        """
+        if not self.params['preprocess']['keep_key_objects_anyway']:
+            return
+        
+        key_objects = self.database_manager.get_key_objects_for_agent(scenario_id, cur_agent_yaml_path)
+        object_dict.update(key_objects)
+        
+    
+    def mask_ego_points(self, points, scenario_id, ego_id):
+        """
+        Remove points of the ego vehicle itself.
+
+        Parameters
+        ----------
+        points : np.ndarray
+            Lidar points under lidar sensor coordinate system.
+
+        scenario_id : str
+            The scenario the ego lie in
+
+        ego_id : int
+            The ego's id.
+
+        Returns
+        -------
+        points : np.ndarray
+            Filtered lidar points.
+
+        """
+        ego_extent = self.database_manager.get_agent_extent(scenario_id, ego_id)
+        # there is no need to mask points for rsu
+        if ego_extent is None:
+            return points
+        
+        if self.dataset_format == 'opv2v' or self.dataset_format == 'v2v4real':
+            mask = (points[:, 0] >= -1.95) & (points[:, 0] <= 2.95) \
+                & (points[:, 1] >= -1.1) & (points[:, 1] <= 1.1)
+        elif self.dataset_format == 'test' or self.dataset_format == 'multi-v2x':
+            mask = (points[:, 0] >= -ego_extent[0]) & (points[:, 0] <= ego_extent[0]) &\
+                    (points[:, 1] >= -ego_extent[1]) & (points[:, 1] <= ego_extent[1])
+        points = points[np.logical_not(mask)]
+
+        return points
 
     def project_points_to_bev_map(self, points, ratio=0.1):
         """
@@ -550,6 +585,7 @@ class BaseDataset(Dataset):
         object_bbx_mask = tmp_dict['object_bbx_mask']
 
         return lidar_np, object_bbx_center, object_bbx_mask
+
 
     def collate_batch_train(self, batch):
         """
@@ -619,3 +655,85 @@ class BaseDataset(Dataset):
                                       show_vis,
                                       save_path,
                                       dataset=dataset)
+        
+
+    @staticmethod
+    def get_empty_test_metric_dict():
+        """
+        Returns a test metric template.
+        """
+        return {
+            "num_of_conn_list": [],   # num of connected agents for each sample
+            "comm_vol_list": [],      # total communication volume in bytes for each sample
+        }
+    
+    @staticmethod
+    def get_test_metric_dict_instance(num_of_conn:int=0, comm_vol:float=0):
+        """
+        Instantialize a test metric dict (for one sample).
+        The test metric dict is expected to be used only when inference
+        with batch size = 1.
+
+        Parameters
+        ----------
+        num_of_conn : int
+            The number of connected agents (including ego) in that sample.
+        comm_vol : float
+            The total communication volume in bytes for ego in that sample.
+
+        Returns
+        -------
+        test_metric_dict : dict
+            E.g.: {
+                "num_of_conn_list": [2],
+                "comm_vol_list": [2.2]
+            }
+
+        """
+        return {
+            "num_of_conn_list": [num_of_conn],
+            "comm_vol_list": [comm_vol]
+        }
+
+    
+    @staticmethod
+    def append_test_metric_dict(test_metric_dict, aother):
+        """
+        Update 
+
+        Parameters
+        ----------
+        test_metric_dict : dict
+
+        aother : dict
+            another test metric dict
+        """
+        test_metric_dict['num_of_conn_list'] += aother['num_of_conn_list']
+        test_metric_dict['comm_vol_list'] += aother['comm_vol_list']
+
+    @staticmethod
+    def print_test_metric_dict(test_metric_dict):
+        # connected agents
+        num_of_conn_list = np.array(test_metric_dict['num_of_conn_list'])
+        print("#agent: max={0}, min={1}, avg.={2:.3f}".format(
+            np.max(num_of_conn_list), np.min(num_of_conn_list), np.mean(num_of_conn_list)
+        ))
+
+        # communication volume
+        comm_vol_list = np.array(test_metric_dict['comm_vol_list'])
+        one_MB = 1048576  # bytes
+        one_KB = 1024     # bytes
+        print("comm_vol(KB): [min,max,avg.]={0:.3f}, {1:.3f}, {2:.3f}".format(
+            np.min(comm_vol_list)/one_KB,
+            np.max(comm_vol_list)/one_KB,
+            np.mean(comm_vol_list)/one_KB
+        ))
+
+        # mask = num_of_conn_list>1  # in case of single car
+        # if np.sum(mask) > 0:
+        #     comm_vol_list = comm_vol_list[mask]
+        #     print("comm_vol(KB, masked by conn): max={0:.3f}, min={1:.3f}, avg.={2:.3f}".format(
+        #         np.max(comm_vol_list)/one_KB, 
+        #         np.min(comm_vol_list)/one_KB, 
+        #         np.mean(comm_vol_list)/one_KB
+        #     ))

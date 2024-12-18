@@ -97,10 +97,16 @@ class BasePostprocessor(object):
 
     def generate_object_center(self,
                                cav_contents,
-                               reference_lidar_pose):
+                               reference_lidar_pose,
+                               return_object_categories:bool=False,
+                               key_object_ids:list=[]):
         """
         Retrieve all objects in a format of (n, 7), where 7 represents
         x, y, z, l, w, h, yaw or x, y, z, h, w, l, yaw.
+
+        New features added by Rongsong Li <rongsong.li@qq.com>:
+        1. additional returns: object categories.
+        2. remain key objects
 
         Parameters
         ----------
@@ -110,6 +116,14 @@ class BasePostprocessor(object):
         reference_lidar_pose : list
             The final target lidar pose with length 6.
 
+        return_object_categories : bool
+            If set, return category of each object. Currently, only
+            multi-v2x and v2v4real are supported. Other datasets,
+            e.g., OPV2V and V2XSet, will default to 'car'.
+
+        key_object_ids : list
+            Key objects will be remained anyway.
+
         Returns
         -------
         object_np : np.ndarray
@@ -118,6 +132,8 @@ class BasePostprocessor(object):
             Shape is (max_num,).
         object_ids : list
             Length is number of bbx in current sample.
+        object_categories : list
+            (Optional). Length is number of bbx in current sample.
         """
         from opencood.data_utils.datasets import GT_RANGE
 
@@ -133,15 +149,31 @@ class BasePostprocessor(object):
                                         output_dict,
                                         reference_lidar_pose,
                                         filter_range,
-                                        self.params['order'])
+                                        self.params['order'],
+                                        key_object_ids)
 
         object_np = np.zeros((self.params['max_num'], 7))
         mask = np.zeros(self.params['max_num'])
         object_ids = []
+        object_categories = []
 
         for i, (object_id, object_bbx) in enumerate(output_dict.items()):
             object_np[i] = object_bbx[0, :]
             mask[i] = 1
             object_ids.append(object_id)
+
+            # Get object's category
+            # used for multi-v2x
+            if 'category' in tmp_object_dict[object_id]:
+                object_categories.append(tmp_object_dict[object_id]['category'])
+            # used for V2V4Real
+            elif 'obj_type' in tmp_object_dict[object_id]:
+                object_categories.append(tmp_object_dict[object_id]['obj_type'])
+            # default to 'car'
+            else:
+                object_categories.append('car')
+
+        if return_object_categories:
+            return object_np, mask, object_ids, object_categories
 
         return object_np, mask, object_ids

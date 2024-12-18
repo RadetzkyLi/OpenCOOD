@@ -436,7 +436,8 @@ def project_world_objects(object_dict,
                           output_dict,
                           lidar_pose,
                           lidar_range,
-                          order):
+                          order,
+                          key_object_ids:list=[]):
     """
     Project the objects under world coordinates into another coordinate
     based on the provided extrinsic.
@@ -457,6 +458,10 @@ def project_world_objects(object_dict,
 
     order : str
         'lwh' or 'hwl'
+
+    key_object_ids : list
+        Key objects will be remained anyway. These ids can be out range of
+        given objects.
     """
     for object_id, object_content in object_dict.items():
         location = object_content['location']
@@ -479,6 +484,73 @@ def project_world_objects(object_dict,
         bbx_lidar = np.dot(object2lidar, bbx).T
         bbx_lidar = np.expand_dims(bbx_lidar[:, :3], 0)
         bbx_lidar = corner_to_center(bbx_lidar, order=order)
+        if object_id in key_object_ids:
+            output_dict.update({object_id: bbx_lidar})
+            continue
+        bbx_lidar = mask_boxes_outside_range_numpy(bbx_lidar,
+                                                   lidar_range,
+                                                   order)
+
+        if bbx_lidar.shape[0] > 0:
+            output_dict.update({object_id: bbx_lidar})
+
+
+def project_world_objects_with_noise(object_dict,
+                          output_dict,
+                          lidar_pose,
+                          lidar_range,
+                          order,
+                          noise_transformation_matrix,
+                          key_object_ids:list=[]):
+    """
+    Project the objects under world coordinates into another coordinate
+    based on the provided extrinsic.
+
+    Parameters
+    ----------
+    object_dict : dict
+        The dictionary contains all objects surrounding a certain cav.
+
+    output_dict : dict
+        key: object id, value: object bbx (xyzlwhyaw).
+
+    lidar_pose : list
+        (6, ), lidar pose under world coordinate, [x, y, z, roll, yaw, pitch].
+
+    lidar_range : list
+         [minx, miny, minz, maxx, maxy, maxz]
+
+    order : str
+        'lwh' or 'hwl'
+
+    key_object_ids : list
+        Key objects will be remained anyway. These ids can be out range of
+        given objects.
+    """
+    for object_id, object_content in object_dict.items():
+        location = object_content['location']
+        rotation = object_content['angle']
+        center = object_content['center']
+        extent = object_content['extent']
+
+        object_pose = [location[0] + center[0],
+                       location[1] + center[1],
+                       location[2] + center[2],
+                       rotation[0], rotation[1], rotation[2]]
+        object2lidar = x1_to_x2(object_pose, lidar_pose)
+
+        # shape (3, 8)
+        bbx = create_bbx(extent).T
+        # bounding box under ego coordinate shape (4, 8)
+        bbx = np.r_[bbx, [np.ones(bbx.shape[1])]]
+
+        # project the 8 corners to world coordinate
+        bbx_lidar = np.dot(noise_transformation_matrix, np.dot(object2lidar, bbx)).T
+        bbx_lidar = np.expand_dims(bbx_lidar[:, :3], 0)
+        bbx_lidar = corner_to_center(bbx_lidar, order=order)
+        if object_id in key_object_ids:
+            output_dict.update({object_id: bbx_lidar})
+            continue
         bbx_lidar = mask_boxes_outside_range_numpy(bbx_lidar,
                                                    lidar_range,
                                                    order)

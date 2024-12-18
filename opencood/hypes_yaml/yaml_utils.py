@@ -9,6 +9,7 @@ import os
 import math
 
 import numpy as np
+from easydict import EasyDict
 
 
 def load_yaml(file, opt=None):
@@ -131,6 +132,24 @@ def load_point_pillar_params(param):
 
     param['postprocess'].update({'anchor_args': anchor_args})
 
+    return param
+
+
+def load_which2comm_params(param):
+    """
+    Convert dict to EasyDict.
+
+    Parameters
+    ----------
+    param : dict
+        Original loaded parameter dictionary.
+
+    Returns
+    -------
+    param : EasyDict
+        Modified parameter dictionary.
+    """
+    param = EasyDict(param)
     return param
 
 

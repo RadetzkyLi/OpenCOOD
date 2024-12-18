@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import numpy as np
 
 from opencood.models.sub_modules.pillar_vfe import PillarVFE
 from opencood.models.sub_modules.point_pillar_scatter import PointPillarScatter
@@ -8,6 +9,7 @@ from opencood.models.fuse_modules.fuse_utils import regroup
 from opencood.models.sub_modules.downsample_conv import DownsampleConv
 from opencood.models.sub_modules.naive_compress import NaiveCompressor
 from opencood.models.fuse_modules.v2xvit_basic import V2XTransformer
+from opencood.utils.common_utils import torch_tensor_to_numpy
 
 
 class PointPillarTransformer(nn.Module):
@@ -17,7 +19,7 @@ class PointPillarTransformer(nn.Module):
         self.max_cav = args['max_cav']
         # PIllar VFE
         self.pillar_vfe = PillarVFE(args['pillar_vfe'],
-                                    num_point_features=args['num_point_features'],
+                                    num_point_features=args.get('num_point_features', 4),
                                     voxel_size=args['voxel_size'],
                                     point_cloud_range=args['lidar_range'])
         self.scatter = PointPillarScatter(args['point_pillar_scatter'])
@@ -42,6 +44,31 @@ class PointPillarTransformer(nn.Module):
 
         if args['backbone_fix']:
             self.backbone_fix()
+
+        # evaluation metrics
+        compress_ratio = args['compression'] if args['compression'] > 0 else 1.0
+        transmit_map_dim = 256 // compress_ratio + 3  # 3(dt dv infra)
+        self.eval_metric_dict = {
+            'num_of_channels': transmit_map_dim,  # channels of transmitted feature map
+            'one_comm_vol': None                  # size of single feature map
+        }
+
+    def compute_communication_volume(self, record_len:list):
+        """
+        Compute the total communication volumn in bytes
+        """
+        B,N = len(record_len),record_len[0]
+        if B>1:
+            return 0.0
+
+        receive = N - 1
+        send = N - 1
+        comm_vol = (receive + send) * self.eval_metric_dict['one_comm_vol']
+
+        if torch.is_tensor(comm_vol):
+            comm_vol = comm_vol.cpu().numpy()
+
+        return comm_vol
 
     def backbone_fix(self):
         """
@@ -106,6 +133,12 @@ class PointPillarTransformer(nn.Module):
                                                regroup_feature.shape[4])
         regroup_feature = torch.cat([regroup_feature, prior_encoding], dim=2)
 
+        # one feature map's communication volume in bytes
+        if self.eval_metric_dict['one_comm_vol'] is None:
+            _,_,_,H,W = regroup_feature.shape
+            self.eval_metric_dict['one_comm_vol'] = \
+                self.eval_metric_dict['num_of_channels'] * H * W * 32/8  # float32
+
         # b l c h w -> b l h w c
         regroup_feature = regroup_feature.permute(0, 1, 3, 4, 2)
         # transformer fusion
@@ -115,8 +148,10 @@ class PointPillarTransformer(nn.Module):
 
         psm = self.cls_head(fused_feature)
         rm = self.reg_head(fused_feature)
+        comm_vol = self.compute_communication_volume(record_len)
 
         output_dict = {'psm': psm,
-                       'rm': rm}
+                       'rm': rm,
+                       'comm_vol': comm_vol}
 
         return output_dict

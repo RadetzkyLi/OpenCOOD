@@ -1,4 +1,6 @@
 import torch.nn as nn
+import numpy as np
+import torch
 
 from opencood.models.sub_modules.base_bev_backbone import BaseBEVBackbone
 from opencood.models.fuse_modules.where2comm_fuse import Where2comm
@@ -14,7 +16,7 @@ class PointPillarWhere2comm(nn.Module):
         self.max_cav = args['max_cav']
         # Pillar VFE
         self.pillar_vfe = PillarVFE(args['pillar_vfe'],
-                                    num_point_features=args['num_point_features'],
+                                    num_point_features=args.get('num_point_features', 4),
                                     voxel_size=args['voxel_size'],
                                     point_cloud_range=args['lidar_range'])
         self.scatter = PointPillarScatter(args['point_pillar_scatter'])
@@ -42,6 +44,45 @@ class PointPillarWhere2comm(nn.Module):
         if args['backbone_fix']:
             self.backbone_fix()
 
+
+        # evaluation metrics
+        self.eval_metric_dict = {}
+        # one full communication map's (C, H, W) volume in bytes
+        self.eval_metric_dict['one_feat_map_comm_vol'] = None
+        self.eval_metric_dict['one_req_map_comm_vol'] = None
+
+    def compute_one_map_comm_vol(self, feature_map):
+        """
+        Compute one feature/request map's communication volume.
+        """
+        if self.eval_metric_dict['one_feat_map_comm_vol'] is None:
+            _,C,H,W = feature_map.shape
+            # 32(float32); 8: bit to byte
+            self.eval_metric_dict['one_feat_map_comm_vol'] = C*H*W*32/8
+            # 1(bool); 8: bit to byte
+            self.eval_metric_dict['one_req_map_comm_vol'] = H*W*1/8
+
+    def compute_communication_volume(self, record_len, communication_rates:float):
+        """Compute the total communication volume in bytes.
+        Transmitted: feature map + request map.
+
+        """
+        B,N = len(record_len),record_len[0]
+        # now, only useful for batch size = 1
+        if B > 1:
+            return 0.0
+        
+        feature_comm_vol = communication_rates * self.eval_metric_dict['one_feat_map_comm_vol']
+        # receive + send
+        request_comm_vol = ((N-1) + (N-1)) * self.eval_metric_dict['one_req_map_comm_vol']
+        
+        comm_vol = feature_comm_vol + request_comm_vol
+        if torch.is_tensor(comm_vol):
+            comm_vol = comm_vol.cpu().numpy()
+
+        return comm_vol
+
+        
     def backbone_fix(self):
         """
         Fix the parameters of backbone during finetune on timedelay.
@@ -99,6 +140,8 @@ class PointPillarWhere2comm(nn.Module):
             spatial_features_2d = self.naive_compressor(spatial_features_2d)
 
         if self.multi_scale:
+            self.compute_one_map_comm_vol(batch_dict['spatial_features'])
+            
             # Bypass communication cost, communicate at high resolution, neither shrink nor compress
             fused_feature, communication_rates = self.fusion_net(batch_dict['spatial_features'],
                                                                  psm_single,
@@ -108,6 +151,8 @@ class PointPillarWhere2comm(nn.Module):
             if self.shrink_flag:
                 fused_feature = self.shrink_conv(fused_feature)
         else:
+            self.compute_one_map_comm_vol(spatial_features_2d)
+
             fused_feature, communication_rates = self.fusion_net(spatial_features_2d,
                                                                  psm_single,
                                                                  record_len,
@@ -115,6 +160,8 @@ class PointPillarWhere2comm(nn.Module):
 
         psm = self.cls_head(fused_feature)
         rm = self.reg_head(fused_feature)
-
-        output_dict = {'psm': psm, 'rm': rm, 'com': communication_rates}
+        comm_vol = self.compute_communication_volume(record_len, communication_rates)
+    
+        output_dict = {'psm': psm, 'rm': rm, 
+                       'com': communication_rates, 'comm_vol': comm_vol}
         return output_dict

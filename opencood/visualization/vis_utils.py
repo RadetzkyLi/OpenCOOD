@@ -281,7 +281,7 @@ def visualize_single_sample_output_gt(pred_tensor,
         vis.create_window()
 
         opt = vis.get_render_option()
-        opt.background_color = np.asarray([0, 0, 0])
+        opt.background_color = np.asarray([0, 0, 0])  # black
         opt.point_size = 1.0
 
         vis.add_geometry(pcd)

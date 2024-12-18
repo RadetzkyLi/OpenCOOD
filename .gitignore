@@ -135,6 +135,14 @@ logs/
 .idea
 
 opv2v_data_dumping
+v2xset
 checkpoints
 DCOS.md
-spconv/
+# spconv/
+
+# examples
+examples/
+# unitests
+unitests/
+# logs
+opencood/logs/

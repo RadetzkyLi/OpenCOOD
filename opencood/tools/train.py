@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # Author: 
 #   Runsheng Xu <rxx3386@ucla.edu>
+# Modified by:
 #   Rongsong Li <rongsong.li@qq.com>
 # License: TDG-Attribution-NonCommercial-NoDistrib
 
@@ -18,8 +19,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 import opencood.hypes_yaml.yaml_utils as yaml_utils
 from opencood.tools import train_utils
 from opencood.tools import multi_gpu_utils
-# from opencood.data_utils.datasets import build_dataset
-from opencood.data_utils.datasets_v2 import build_dataset
+from opencood.data_utils.datasets import build_dataset
 from opencood.tools import train_utils
 from opencood.utils import logging_utils
 
@@ -159,6 +159,8 @@ def main():
         train_ave_loss = []
         start_time2 = time.time()
 
+        num_pr_list, num_gt_list = [],[]
+
         for i, batch_data in enumerate(train_loader):
             # the model will be evaluation mode during validation
             model.train()
@@ -185,7 +187,6 @@ def main():
                     final_loss = criterion(ouput_dict,
                                            batch_data['ego']['label_dict'])
 
-
             criterion.logging(epoch, i, len(train_loader), writer, pbar=pbar2)
             pbar2.update(1)
             train_ave_loss.append(final_loss.item())
@@ -200,7 +201,7 @@ def main():
 
             if hypes['lr_scheduler']['core_method'] == 'cosineannealwarm':
                 scheduler.step_update(epoch * num_steps + i)
-
+        
         # reocrd loss
         train_loss_list.append(statistics.mean(train_ave_loss))
 
