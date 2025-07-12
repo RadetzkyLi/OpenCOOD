@@ -70,15 +70,15 @@ def update_hypes(hypes, opt):
     if opt.dataset_root is not None:
         hypes['root_dir'] = opt.dataset_root
 
-    # prpreocess
+    # preprocess
     hypes['preprocess']['keep_key_objects_anyway'] = True
 
-    # no async
-    if 'wild_setting' in hypes:
-        if 'async' in hypes['wild_setting']:
-            hypes['wild_setting'].update({
-                "async": False
-            })
+    # temporal workaround: no async
+    # if 'wild_setting' in hypes:
+    #     if 'async' in hypes['wild_setting']:
+    #         hypes['wild_setting'].update({
+    #             "async": False
+    #         })
 
 def get_dataset_name_from_root(root:str):
     name = os.path.basename(root)

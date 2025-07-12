@@ -7,7 +7,9 @@ We save all groundtruth annotations per agent per timestamp in the yaml files. F
 agent 208 at timestamp 68 in the scenario database `Town01__2023_11_10_22_23_28`. 
 
 The annotation format inherites from that of OPV2V and V2XSet (see [here](https://github.com/DerrickXuNu/OpenCOOD/blob/main/docs/md_files/data_annotation_tutorial.md)) and the minor modifications are as follows:
-- changed field name: "vehicles" --> "objects"
+- changed field name: 
+  - "vehicles" --> "objects"
+  - "cords" --> "coords"
 
 - changed field content: 
 
@@ -28,7 +30,7 @@ cameraFront: # parameters for frontal camera (only cav)
   - 0.07589337974786758
   - 174.18048095703125
   - 0.20690691471099854
-  extrinsic: # extrinsic matrix from camera to LiDAR
+  extrinsic: # extrinsic matrix from LiDAR to camera
   - - 0.9999999999999999
     - -5.1230071481984265e-18
     - 9.322129061605055e-20
@@ -122,7 +124,7 @@ visible_objects:
 - ...
 ```
 
-To facilitate log replay and various evaluation range, **all objects' moving information** at each frame are stored `scenario_name/map`, in which one `.yaml` file records info of a frame. Here, we go through an example of ``Town01__2023_11_10_22_23_28/map/00068.yaml`` :
+To facilitate log replay and various evaluation range, **all objects' moving information** at each frame are stored in `{scenario_name}/map`, in which one `.yaml` file records info of a frame. Here, we go through an example of ``Town01__2023_11_10_22_23_28/map/00068.yaml`` :
 
 ```yaml
 objects:
